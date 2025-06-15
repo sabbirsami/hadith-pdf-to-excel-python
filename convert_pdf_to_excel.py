@@ -26,7 +26,7 @@ class PDFToExcelConverter:
         # Configure Tesseract (adjust path if needed)
         # pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
-    def step1_pdf_to_images(self, max_pages=20):
+    def step1_pdf_to_images(self, max_pages=50):
         """Convert PDF pages to images"""
         print("Step 1: Converting PDF to images...")
 
@@ -170,12 +170,78 @@ class PDFToExcelConverter:
         print("Document formatting completed")
         return formatted_doc_path
 
+    def find_start_position(self, content):
+        """Find the position where data collection should start (after সূচিপত্র)"""
+        print("Looking for সূচিপত্র to determine start position...")
+
+        # Look for সূচিপত্র
+        suchipottro_pos = content.find('সূচিপত্র')
+        if suchipottro_pos == -1:
+            print("Warning: সূচিপত্র not found. Starting from beginning.")
+            return 0
+
+        print(f"Found সূচিপত্র at position {suchipottro_pos}")
+
+        # Look for first অধ্যায়ঃ after সূচিপত্র
+        search_start = suchipottro_pos + len('সূচিপত্র')
+        first_chapter_pos = content.find('অধ্যায়ঃ', search_start)
+
+        if first_chapter_pos == -1:
+            print("Warning: No অধ্যায়ঃ found after সূচিপত্র. Starting from সূচিপত্র position.")
+            return suchipottro_pos
+
+        print(f"Found first অধ্যায়ঃ at position {first_chapter_pos}")
+        return first_chapter_pos
+
+    def is_arabic_text(self, text):
+        """Check if text contains Arabic characters"""
+        arabic_pattern = r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]'
+        return bool(re.search(arabic_pattern, text))
+
+    def is_bengali_text(self, text):
+        """Check if text contains Bengali characters"""
+        bengali_pattern = r'[\u0980-\u09FF]'
+        return bool(re.search(bengali_pattern, text))
+
+    def is_section_title(self, text, current_chapter_name):
+        """Check if text is likely a section title"""
+        if not text or not current_chapter_name:
+            return False
+
+        # Basic checks
+        if (len(text) < 5 or len(text) > 200 or
+            text.startswith('[') or
+            re.search(r'অধ্যায়ঃ', text) or
+            re.search(r'=== PAGE', text) or
+            re.search(r'^\d+\s*$', text) or
+            re.search(r'\[\d+\]', text)):
+            return False
+
+        # Should contain Bengali text
+        if not self.is_bengali_text(text):
+            return False
+
+        # Should not be too sentence-like (not end with period usually)
+        if text.endswith('.') and len(text.split()) > 8:
+            return False
+
+        # Should have reasonable word count
+        word_count = len(text.split())
+        if word_count < 2 or word_count > 15:
+            return False
+
+        return True
+
     def extract_data_from_text(self, formatted_text_path):
         """Extract chapters, sections, and hadiths from formatted text"""
         print("Extracting data from formatted text...")
 
         with open(formatted_text_path, 'r', encoding='utf-8') as f:
             content = f.read()
+
+        # Find the start position (after সূচিপত্র)
+        start_pos = self.find_start_position(content)
+        content = content[start_pos:]  # Only process content after সূচিপত্র
 
         chapters = []
         sections = []
@@ -186,63 +252,117 @@ class PDFToExcelConverter:
 
         chapter_id = 1
         section_id = 1
-        hadith_id = 1
+        current_chapter_name = ""
 
-        for page in pages:
+        print("Processing pages for data extraction...")
+
+        for page_idx, page in enumerate(pages):
             if not page.strip():
                 continue
 
+            print(f"Processing page {page_idx + 1}...")
             lines = page.split('\n')
 
-            for i, line in enumerate(lines):
-                line = line.strip()
+            i = 0
+            while i < len(lines):
+                line = lines[i].strip()
                 if not line:
+                    i += 1
                     continue
 
                 # Extract chapters (অধ্যায়ঃ)
-                if 'অধ্যায়ঃ' in line or 'অধ্যায়-' in line:
-                    chapter_match = re.search(r'অধ্যায়[ঃ-]\s*(.+)', line)
-                    if chapter_match:
-                        chapter_name = chapter_match.group(1).strip()
+                chapter_match = re.search(r'অধ্যায়ঃ\s*(.+)', line)
+                if chapter_match:
+                    chapter_name = chapter_match.group(1).strip()
+                    # Clean chapter name
+                    chapter_name = re.sub(r'^\d+[।.\-\s]*', '', chapter_name)  # Remove leading numbers
+                    chapter_name = chapter_name.strip()
+
+                    if chapter_name:
                         chapters.append({
                             'id': chapter_id,
                             'name': chapter_name
                         })
+                        current_chapter_name = chapter_name
                         chapter_id += 1
+                        print(f"Found chapter: {chapter_name}")
 
-                # Extract sections (bold text after অধ্যায়ঃ)
-                if line and len(line) > 20 and not line.startswith('[') and 'অধ্যায়' not in line:
-                    # Check if this could be a section header
-                    if re.match(r'^[^\[\]]+$', line) and not re.search(r'\d+\.\s', line):
-                        sections.append({
-                            'id': section_id,
-                            'name': line.strip()
-                        })
-                        section_id += 1
+                    i += 1
+                    continue
 
-                # Extract hadiths (text in [] brackets)
-                hadith_matches = re.finditer(r'\[(\d+)\]', line)
-                for match in hadith_matches:
-                    hadith_number = match.group(1)
-                    # Find the hadith text after the bracket
-                    start_pos = match.end()
+                # Extract sections (text that appears after chapters, bold/middle text)
+                if self.is_section_title(line, current_chapter_name):
+                    sections.append({
+                        'id': section_id,
+                        'name': line.strip()
+                    })
+                    section_id += 1
+                    print(f"Found section: {line.strip()}")
+                    i += 1
+                    continue
 
-                    # Collect text until next hadith or end
-                    hadith_text = ""
-                    for j in range(i, min(i + 10, len(lines))):  # Look ahead up to 10 lines
-                        text_line = lines[j].strip()
-                        if j == i:
-                            hadith_text += text_line[start_pos:].strip()
-                        else:
-                            if re.search(r'\[\d+\]', text_line):
+                # Extract hadiths (text starting with [number])
+                hadith_matches = list(re.finditer(r'\[(\d+)\]', line))
+                if hadith_matches:
+                    for match in hadith_matches:
+                        hadith_number = match.group(1)
+
+                        # Find the hadith text after the bracket
+                        start_pos = match.end()
+                        hadith_text = line[start_pos:].strip()
+
+                        # Collect Bengali text until we find Arabic text followed by next hadith
+                        j = i + 1
+                        bengali_complete = False
+
+                        while j < len(lines):
+                            next_line = lines[j].strip()
+                            if not next_line:
+                                j += 1
+                                continue
+
+                            # Stop if we find another hadith number
+                            if re.search(r'\[\d+\]', next_line):
                                 break
-                            hadith_text += " " + text_line
 
-                    if hadith_text.strip():
-                        hadiths.append({
-                            'id': hadith_number,
-                            'hadith': hadith_text.strip()
-                        })
+                            # Stop if we find a new chapter
+                            if re.search(r'অধ্যায়ঃ', next_line):
+                                break
+
+                            # Stop if we find page marker
+                            if re.search(r'=== PAGE', next_line):
+                                break
+
+                            # Check if this line contains Bengali text
+                            if self.is_bengali_text(next_line):
+                                hadith_text += " " + next_line
+                                bengali_complete = False  # Still collecting Bengali
+
+                            # Check if this line contains Arabic text
+                            elif self.is_arabic_text(next_line):
+                                # If we had Bengali text before, this Arabic marks the end
+                                if hadith_text.strip() and self.is_bengali_text(hadith_text):
+                                    bengali_complete = True
+                                    break
+
+                            # If it's neither Bengali nor Arabic, add it anyway
+                            else:
+                                hadith_text += " " + next_line
+
+                            j += 1
+
+                        # Clean up hadith text
+                        hadith_text = re.sub(r'\s+', ' ', hadith_text).strip()
+
+                        # Only save if substantial Bengali text
+                        if hadith_text and len(hadith_text) > 10 and self.is_bengali_text(hadith_text):
+                            hadiths.append({
+                                'id': hadith_number,
+                                'hadith': hadith_text
+                            })
+                            print(f"Found hadith [{hadith_number}]: {hadith_text[:50]}...")
+
+                i += 1
 
         print(f"Extracted: {len(chapters)} chapters, {len(sections)} sections, {len(hadiths)} hadiths")
         return chapters, sections, hadiths
@@ -318,7 +438,7 @@ class PDFToExcelConverter:
         print(f"Excel file created: {excel_path}")
         return excel_path
 
-    def run_conversion(self, max_pages=20):
+    def run_conversion(self, max_pages=50):
         """Run the complete conversion process"""
         print("Starting PDF to Excel conversion...")
         print("="*50)
@@ -364,7 +484,7 @@ if __name__ == "__main__":
     pdf_path = "bangla_hadith.pdf"  # Replace with your PDF path
     converter = PDFToExcelConverter(pdf_path)
 
-    # Run conversion for first 20 pages
-    excel_file = converter.run_conversion(max_pages=20)
+    # Run conversion for first 50 pages (increased from 20)
+    excel_file = converter.run_conversion(max_pages=50)
 
     print(f"\nConversion completed! Excel file saved at: {excel_file}")

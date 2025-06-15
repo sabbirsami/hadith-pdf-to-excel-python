@@ -2,3 +2,4 @@ hadith-env/
 *.pyc
 __pycache__/
 *.xlsx
+output/
